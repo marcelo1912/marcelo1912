@@ -1,0 +1,110 @@
+# Importando a configuração do BH1750.
+import machine
+from bh1750 import BH1750
+
+# Importando as bibliotécas necessárias para execução do código.
+import time
+from umqttsimple import MQTTClient
+import ubinascii
+import machine
+import micropython
+import network
+import esp
+from machine import Pin
+import dht
+esp.osdebug(None)
+import gc
+gc.collect()
+
+# Informações para conectar com o RaspBerry.
+ssid = 'raspi-webgui'
+password = 'ChangeMe'
+mqtt_server = '10.3.141.1'
+
+client_id = ubinascii.hexlify(machine.unique_id())
+
+# Definição do tópico que será mostrado no Node-RED.
+topic_pub_lux = b'estacao/sensor/subsolo' # mudará de acordo com o ambiente.
+topic_sub_saida = b'estacao/lampada/subsolo' # mudará de acordo com o ambiente.
+
+# Etapa de conexão com o o RaspBerry.
+last_message = 0
+message_interval = 5
+
+station = network.WLAN(network.STA_IF)
+
+station.active(True)
+station.connect(ssid, password)
+
+while station.isconnected() == False:
+  pass
+
+print('Connection successful')
+
+# Definição da pinagem.
+saida = machine.Pin(2)
+scl = machine.Pin(22)
+sda = machine.Pin(21)
+i2c = machine.SoftI2C(scl=scl, sda=sda)
+s = BH1750(i2c)
+
+# Status da conexão com o RaspBerry.
+def connect_mqtt():
+  global client_id, mqtt_server
+  client = MQTTClient(client_id, mqtt_server)
+  client.connect()
+  print('Connected to %s MQTT broker' % (mqtt_server))
+  return client
+
+def restart_and_reconnect():
+  print('Failed to connect to MQTT broker. Reconnecting...')
+  time.sleep(10)
+  machine.reset()
+
+# Leitura do sensor de luminosidade.
+def read_lux():
+  try:
+    lux = s.luminance(BH1750.ONCE_HIRES_1)
+    if (isinstance(lux, float)) or (isinstance(lux, int)):
+      lux =  (b'{0:3.1f},'.format(lux))
+      return lux
+    else:
+      return('Invalid sensor readings.')
+  except OSError as e:
+    return('Failed to read sensor.')
+
+try:
+  client = connect_mqtt()
+except OSError as e:
+  restart_and_reconnect()
+
+while True:
+  try:
+    if (time.time() - last_message) > message_interval:
+      lux = read_lux()
+      print(lux)
+      client.publish(topic_pub_lux, lux)
+      last_message = time.time()
+  except OSError as e:
+    restart_and_reconnect()
+
+# Definições de parâmetros para ligar e desligar a lâmpada em cada ESP.
+def cb(topic, msg):
+      print('Received Data:  Topic = {}, Msg = {}'.format(topic, msg))
+      if topic == b'estacao/lampada/subsolo': # mudará de acordo com o ambiente.
+          if msg == b'1':
+              print('Desligar lampada')
+              saida.value(1)            
+          else:
+            print('Ligar lampada')
+            saida.value(0)
+
+# Funcao Callback
+client.set_callback(cb)
+
+# Inscricao nos tópicos, onde cada ESP terá o seu nome
+# de acordo com o ambiente, por exemplo:
+# o hall, será "estacao/lampada/hall".
+# a escada, será "estacao/lampada/escada".
+# o subsolo2, será "estacao/lampada/subsolo2".
+client.subscribe(b'estacao/lampada/subsolo')
